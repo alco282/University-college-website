@@ -1,0 +1,22 @@
+node_modules/
+client/node_modules/
+.env
+.env.*
+!.env.example
+uploads/
+client/build/
+*.log
+npm-debug.log*
+.DS_Store
+coverage/
+
+# Local ML moderation model weights are provisioned by npm run setup:moderation.
+models/
+
+# Geo dataset is downloaded at build time (npm run vendor:geo-data)
+client/public/geo-data/*
+!client/public/geo-data/.gitkeep
+!client/public/geo-data/README.md
+
+# Local overrides
+docker-compose.override.yml

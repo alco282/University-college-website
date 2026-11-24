@@ -1,0 +1,203 @@
+version: '3.8'
+
+services:
+  # ============================================================================
+  # PostgreSQL Database Service
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: e_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    networks:
+      - db_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================================
+  # Redis Service (Distributed Rate Limiter & Token Invalidation Cache)
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: e_redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}"]
+    volumes:
+      - redisdata:/data
+    networks:
+      - cache_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ============================================================================
+  # Application Backend Service (API & Static Server)
+  # ============================================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        REACT_APP_TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY}
+    container_name: e_app
+    restart: unless-stopped
+    # SECURITY FIX: no `ports:` mapping here anymore. Previously
+    # `"5000:5000"` published the app directly on the Docker host, meaning
+    # anyone who could reach the host on port 5000 bypassed Cloudflare
+    # entirely — including the CF-Connecting-IP trust boundary that
+    # middleware/security.js's `resolveClientIp` relies on (an attacker
+    # hitting this port directly could forge that header freely). In this
+    # architecture, `cloudflared` is meant to be the ONLY ingress path, and
+    # it already reaches `app:5000` over the internal `app_net` bridge
+    # without needing a host port published at all.
+    #
+    # For local development where you need to curl the API directly without
+    # going through a tunnel, add the port back via a local, untracked
+    # override file (docker-compose.override.yml, which Docker Compose
+    # merges automatically and should be .gitignored):
+    #
+    #   services:
+    #     app:
+    #       ports:
+    #         - "127.0.0.1:5000:5000"   # bind to loopback only, not 0.0.0.0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      # Under `read_only: true`, any library that writes to the user's home
+      # directory (e.g. npm/tfjs cache dotfiles) needs a writable HOME —
+      # route it to the same writable /tmp volume rather than leaving it
+      # pointed at the now-read-only default.
+      HOME: /tmp
+    volumes:
+      - uploads_data:/app/uploads
+      # Writable scratch space for a read-only root filesystem (see below).
+      - app_tmp:/tmp
+    networks:
+      - db_net
+      - cache_net
+      - app_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Least-privilege filesystem: the app only ever needs to write to
+    # /app/uploads (a dedicated volume) and /tmp (scratch). Everything else
+    # — code, node_modules, the compiled client build — is immutable at
+    # runtime, which meaningfully limits what a code-execution
+    # vulnerability could persist or tamper with.
+    read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:5000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 1g
+    cpus: 1.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # ============================================================================
+  # Cloudflare Quick Tunnel 
+  # ============================================================================
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: e_tunnel
+    restart: unless-stopped
+    command: tunnel --url http://app:5000 --no-autoupdate
+    networks:
+      - app_net
+    depends_on:
+      app:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+    mem_limit: 256m
+    cpus: 0.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  db_net:
+    driver: bridge
+    internal: true
+  cache_net:
+    driver: bridge
+    internal: true
+  app_net:
+    driver: bridge
+
+volumes:
+  pgdata:
+    driver: local
+  redisdata:
+    driver: local
+  uploads_data:
+    driver: local
+  app_tmp:
+    driver: local

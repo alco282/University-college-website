@@ -1,0 +1,15 @@
+{
+  "short_name": "Residence Portal",
+  "name": "University Residence - Digital Portal",
+  "icons": [
+    {
+      "src": "faviconV2.png",
+      "sizes": "any",
+      "type": "image/png"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#B31217",
+  "background_color": "#F4F3EF"
+}
